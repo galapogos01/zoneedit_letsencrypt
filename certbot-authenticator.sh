@@ -210,7 +210,7 @@ fi
 
 # Send the login POST request
 output "Logging in"
-CURL https://cp.zoneedit.com/home/ 02home -d login_chal=$login_chal -d login_hash=$hash -d login_user=$ZONEEDIT_USER -d login_pass=$ZONEEDIT_PASS -d csrf_token=$token -d login=
+CURL https://cp.zoneedit.com/home/ 02home -d login_chal=$login_chal -d login_hash=$login_hash -d login_user=$ZONEEDIT_USER -d login_pass=$ZONEEDIT_PASS -d csrf_token=$token -d login=
 
 # Check that login was successful
 # when successfull, we get this in the header
