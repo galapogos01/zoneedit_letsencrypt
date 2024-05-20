@@ -49,6 +49,19 @@ if [ ! -f $DIR/id ] ; then
 
 else
 	echo "ID found - assuming cleanup run"
+
+	# Set the arguments based on if DEBUG, VERBOSE or DRYRUN is set from calling script (in environment)
+	ARGS="-d $CERTBOT_DOMAIN -n _acme-challenge -v $CERTBOT_VALIDATION -i $ID -c"
+	if [ $DEBUG ] ; then
+		ARGS="$ARGS -D"
+	elif [ $VERBOSE ] ; then
+		ARGS="$ARGS -V"
+	fi
+
+	# Run the zoneedit TXT record update script - if config not set, this will fail
+	echo "./certbot-authenticator.sh $ARGS"
+	./certbot-authenticator.sh $ARGS || exit $?
+
 	echo "Removing /tmp/zoneedit/$CERTBOT_DOMAIN"
 	rm -rf /tmp/zoneedit/$CERTBOT_DOMAIN
 	rm -rf /tmp/zoneedit/

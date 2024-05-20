@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Temp dir where we store our files as we execute
-TMPDIR=/tmp/zoneedit
+TMPDIR=/tmp/zoneedit/$CERTBOT_DOMAIN
 
 # Path to config file
 CONFIG=/etc/sysconfig/zoneedit.cfg
@@ -24,6 +24,9 @@ ZAP=1
 # No dry run by default
 DRYRUN=""
 
+# No clean by default
+CLEAN=0
+
 # Run a curl command
 # Usage:
 #   CURL url output [data]
@@ -39,14 +42,14 @@ CURL() {
 	local OUT=$2
 	shift 2
 	local DATA=$@
-	local CMD="curl -b $COOKIES -c $COOKIES -D $TMPDIR/$OUT.header $DATA $URL"
+	local CMD="curl --user $ZONEEDIT_USER:$ZONEEDIT_PASS -D $TMPDIR/$OUT.header $DATA $URL"
 	if [ -f $TMPDIR/$OUT.html ] ; then
 		if [ $DEBUG ] ; then
 			echo "Found $OUT.htnl. Not running '$CMD' > $TMPDIR/$OUT.html 2> $TMPDIR/$OUT.stderr"
 		fi
 	else
 		if [ $DEBUG ] ; then
-			echo "Running '$CMD' > $TMPDIR/$OUT.html 2> $TMPDIR/$OUT.stderr"
+			echo "Running $CMD 2> $TMPDIR/$OUT.stderr | sed -e \"s/>/>\\n/g\" > $TMPDIR/$OUT.html"
 		elif [ $VERBOSE ] ; then
 			echo "$URL"
 		fi
@@ -71,6 +74,7 @@ Usage() {
 		echo "      -v value   Specify the value of the TXT record to edit (require)."
 		echo "      -t ttl     Specify time to live in seconds (optional - default 60)."
 		echo "      -i id      Specify ID of TXT record to edit (optional - default 0)."
+		echo "      -c         Cleanup (delete old TXT record)."
 	else
 		echo "ERROR: $@"
 		exit 1
@@ -120,6 +124,8 @@ while [ $# -gt 0 ] ; do
 		txt_id=$1
 	elif [ "$1" = "-k" ] ; then
 		ZAP=
+	elif [ "$1" = "-c" ]; then
+		CLEAN=1
 	fi
 	shift
 done
@@ -184,205 +190,41 @@ fi
 # ------------------------------------------------------------------------------
 
 # Start the process
-# First, we need to access the main login page to initialize cookies and session info
-output "Getting initial login cookies"
-CURL https://cp.zoneedit.com/login.php 01login
+# 2024-05-21 https://github.com/blueslow/sslcertzoneedit
+# https://dynamic.zoneedit.com/txt-create.php?host=_acme-challenge.example.com&rdata=depE1VF_xshMm1IVY1Y56Kk9Zb_7jA2VFkP65WuNgu8W
+# OR 
+# https://dynamic.zoneedit.com/txt-delete.php?host=_acme-challenge.example.com&rdata=depE1VF_xshMm1IVY1Y56Kk9Zb_7jA2VFkP65WuNgu8W
 
-# Get the initial token
-token=`grep csrf_token $TMPDIR/01login.html | sed -e "s/.*value=//" | cut -d'"' -f2`
-if [ $DEBUG ] ; then
-	echo "csrf_token = '$token'"
-fi
+if [ $CLEAN -ne 1 ] ; then
+	output Create TXT record using API
+	CURL "https://dynamic.zoneedit.com/txt-create.php?host=$txt_name.$txt_domain&rdata=$txt_value" 01update
 
-# Create the required hashes for login
-login_chal=`grep login_chal.*VALUE $TMPDIR/01login.html  | sed -e "s/.*login_chal//" | cut -d'"' -f3`
-if [ $DEBUG ] ; then
-	echo "login_chal = '$login_chal'"
-fi
-MD5_pass=`echo "$ZONEEDIT_PASS" | md5sum | cut -d' ' -f1`
-if [ $DEBUG ] ; then
-	echo "MD5_pass = '$MD5_pass'"
-fi
-login_hash=`echo "$ZONEEDIT_USER$MD5_pass$login_chal" | md5sum | cut -d' ' -f1`
-if [ $DEBUG ] ; then
-	echo "login_hash = '$login_hash'"
-fi
-
-# Send the login POST request
-output "Logging in"
-CURL https://cp.zoneedit.com/home/ 02home -d login_chal=$login_chal -d login_hash=$login_hash -d login_user=$ZONEEDIT_USER -d login_pass=$ZONEEDIT_PASS -d csrf_token=$token -d login=
-
-# Check that login was successful
-# when successfull, we get this in the header
-#    Location: https://cp.zoneedit.com/manage/domains/
-# on failure, we get this in the header
-#    Location: https://cp.zoneedit.com/login.php
-
-LOCATION=`grep ^Location: $TMPDIR/02home.header | cut -d' ' -f2`
-if [ $DEBUG ] ; then
-	echo "LOCATION = '$LOCATION'"
-fi
-if [ `echo $LOCATION | grep -c manage/domains` -eq 0 ] ; then
-	echo "ERROR: Invalid user of password!"
-	exit 1
-fi
-
-# Get our domain list
-output "Validating domain"
-CURL https://cp.zoneedit.com/manage/domains/ 03domains
-
-# Check that the requested domain exists in our domain list
-if [ `grep -c "index.php?LOGIN=$txt_domain\"" $TMPDIR/03domains.html` -eq 0 ] ; then
-	echo "ERROR: Invalid domain '$txt_domain'!"
-	exit 1
-fi
-
-# Access the domain we are wanting to edit
-CURL https://cp.zoneedit.com/manage/domains/zone/index.php?LOGIN=$txt_domain 04domain
-
-# Check we successfully switched to domain
-if [ `grep -c "^$txt_domain</" $TMPDIR/04domain.html` -eq 0 ] ; then
-	echo "ERROR: Unable to access domain '$txt_domain'!"
-	exit 1
-fi
-
-# Switch to the TXT records edit page
-output "Loading TXT edit page"
-CURL https://cp.zoneedit.com/manage/domains/txt/ 05txt
-
-# Click the edit button
-CURL https://cp.zoneedit.com/manage/domains/txt/edit.php 06edit
-
-# Get the token and other generated values
-FILE=$TMPDIR/06edit.html
-token=`grep csrf_token $FILE | sed -e "s/.*value=//" | cut -d'"' -f2`
-if [ $DEBUG ] ; then
-	echo "csrf_token = '$token'"
-fi
-multipleTabFix=`grep multipleTabFix $FILE | sed -e "s/.*multipleTabFix//" | cut -d'"' -f3`
-if [ $DEBUG ] ; then
-	echo "multipleTabFix = '$multipleTabFix'"
-fi
-
-# Figure out which id to use in the TXT records based on our name and id we asked for
-i=0
-found_ids=0
-our_id=-1
-while [ `grep -c TXT::$i::host $FILE` -gt 0 ] ; do
-	name=`grep "TXT::$i::host.*value=" $FILE | sed -e "s/.*value=//" | cut -d\" -f2`
-	# If the TXT record has no name or the same as ours...
-	if [ "$name" = "" -o "$name" = "$txt_name" ] ; then
-		if [ $DEBUG ] ; then
-			echo "Checking id $i with name='$name'"
-		fi
-		# If the found id count is same as our, then use it
-		if [ $found_ids -eq $txt_id ] ; then
-			if [ $VERBOSE ] ; then
-				echo "Using id $i with name='$name'"
-			fi
-			our_id=$i
-			break
-		fi
-		# If not, just increase found count for next loop
-		found_ids=$[$found_ids+1]
-	else
-		if [ $DEBUG ] ; then
-			echo "Skipping id $i with name='$name'"
-		fi
-	fi
-	i=$[$i+1]
-done
-
-# If we didn't set the id, then we need to abort
-if [ $our_id -eq -1 ] ; then
-	echo "ERROR: Failed to find a TXT record to use! Please cleanup some TXT records in ZoneEdit and try again."
-	exit 1
-fi
-
-# Build the full data set based on what is already configured in the domain
-DATA="-d MODE=edit -d csrf_token=$token -d multipleTabFix=$multipleTabFix"
-i=0
-while [ `grep -c TXT::$i::host $FILE` -gt 0 ] ; do
-	name=`grep "TXT::$i::host.*value=" $FILE | sed -e "s/.*value=//" | cut -d\" -f2`
+	# Get the response SUCCESS CODE="200"
+	response=`grep 'SUCCESS CODE="200"' $TMPDIR/01update.html `
 	if [ $DEBUG ] ; then
-		echo "TXT::$i::host = '$name'"
-	fi
-	val=`grep "TXT::$i::txt.*value=" $FILE | sed -e "s/.*value=//" | cut -d\" -f2`
-	if [ $DEBUG ] ; then
-		echo "TXT::$i::txt = '$val'"
-	fi
-	ttl=`grep "TXT::$i::ttl.*value=" $FILE | sed -e "s/.*value=//" | cut -d\" -f2`
-	if [ $DEBUG ] ; then
-		echo "TXT::$i::ttl = '$ttl'"
-	fi
-	if [ $i -eq $our_id ] ; then
-		# If it's the record we are asking to edit, the set values based on what we passed in
-		if [ $DEBUG ] ; then
-			echo "Using our values for TXT::$i::...."
-		fi
-		DATA="$DATA -d TXT::$our_id::host=$txt_name -d TXT::$our_id::txt=$txt_value -d TXT::$our_id::ttl=$txt_ttl"
-	elif [ ! "$name" = "" ] ; then
-		# Otherwise, get existing data to pass back in
-		if [ $DEBUG ] ; then
-			echo "Using values already set for TXT::$i::...."
-		fi
-		DATA="$DATA -d TXT::$i::host=$name -d TXT::$i::txt=$val -d TXT::$i::ttl=$ttl"
-	fi
-	i=$[$i+1]
-done
-
-if [ $DRYRUN ] ; then
-
-	output "OK: Succcessfully completed Dry-run."
-	exit 0
-
-else
-
-	# Send the new values (click on the save button)
-	output "Sending new TXT record values"
-	CURL https://cp.zoneedit.com/manage/domains/txt/edit.php 07save $DATA
-
-	# Get token and other values
-	FILE=$TMPDIR/07save.html
-	token=`grep csrf_token $FILE | sed -e "s/.*value=//" | cut -d'"' -f2`
-	if [ $DEBUG ] ; then
-		echo "csrf_token = '$token'"
-	fi
-	multipleTabFix=`grep multipleTabFix $FILE | sed -e "s/.*multipleTabFix//" | cut -d'"' -f3`
-	if [ $DEBUG ] ; then
-		echo "multipleTabFix = '$multipleTabFix'"
-	fi
-	NEW_TXT=`grep hidden.*NEW_TXT $FILE  | sed -e "s/.*NEW_TXT//" | cut -d'"' -f3`
-	if [ $DEBUG ] ; then
-		echo "NEW_TXT = '$NEW_TXT'"
+		echo "response = '$response'"
 	fi
 
-	# Save the new values (click the confirm button)
-	CURL https://cp.zoneedit.com/manage/domains/txt/confirm.php 08confirm -d csrf_token=$token -d confirm= -d multipleTabFix=$multipleTabFix -d NEW_TXT=$NEW_TXT
-
-	# Finally, get the table back to confirm settings saves properly
-	output "Confirming change succeeded"
-	CURL https://cp.zoneedit.com/manage/domains/txt/edit.php 09edit
-
-	# Check that new values are what we expect
-	FILE=$TMPDIR/09edit.html
-	name=`grep "TXT::$our_id::host.*value=" $FILE | sed -e "s/.*value=//" | cut -d\" -f2`
-	if [ $DEBUG ] ; then
-		echo "name = '$name'"
-	fi
-	val=`grep "TXT::$our_id::txt.*value=" $FILE | sed -e "s/.*value=//" | cut -d\" -f2`
-	if [ $DEBUG ] ; then
-		echo "val = '$val'"
-	fi
-	ttl=`grep "TXT::$our_id::ttl.*value=" $FILE | sed -e "s/.*value=//" | cut -d\" -f2`
-	if [ $DEBUG ] ; then
-		echo "ttl = '$ttl'"
-	fi
-	if [ "$name" = "$txt_name" -a "$val" = "$txt_value" -a "$ttl" = "$txt_ttl" ] ; then
-		echo "OK: Successfully set TXT record $txt_name.$txt_domain=$txt_value"
-	else
-		echo "ERROR: TXT record #$our_id is $name.$txt_domain=$val instead of expected $txt_name.$txt_domain=$txt_value"
+	if [ '$response' == '' ] ; then
+		echo "ERROR: Did not get a success response!"
 		exit 1
 	fi
-fi
 
+	echo "OK: Successfully set TXT record $txt_name.$txt_domain=$txt_value"
+else
+	output Delete TXT record using API
+	CURL "https://dynamic.zoneedit.com/txt-delete.php?host=$txt_name.$txt_domain&rdata=$txt_value" 01update
+
+	# Get the response SUCCESS CODE="200"
+	response=`grep 'SUCCESS CODE="200"' $TMPDIR/01update.html `
+	if [ $DEBUG ] ; then
+		echo "response = '$response'"
+	fi
+
+	if [ '$response' == '' ] ; then
+		echo "ERROR: Did not get a success response!"
+		exit 1
+	fi
+
+	echo "OK: Successfully deleted TXT record $txt_name.$txt_domain=$txt_value"
+fi
